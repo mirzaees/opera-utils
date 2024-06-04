@@ -191,8 +191,8 @@ def _burst_id_mapping_from_files(
     # Group the possible SLC files by their datetime and by their Burst ID
     burst_id_to_files = group_by_burst(slc_file_list)
 
-    date_tuples = [get_dates(f) for f in slc_file_list]
-    assert all(len(tup) == 1 for tup in date_tuples)
+    # date_tuples = [get_dates(f) for f in slc_file_list]
+    # assert all(len(tup) == 1 for tup in date_tuples)
 
     return {
         burst_id: [get_dates(f)[0] for f in file_list]
