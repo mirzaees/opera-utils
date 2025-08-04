@@ -1,9 +1,13 @@
 """Module for exploring HDF5 files interactively in Jupyter."""
+
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Any
 
 import h5py
+import ipywidgets as widgets
+import matplotlib.pyplot as plt
 import numpy as np
 
 from ._types import PathOrStr
@@ -15,7 +19,9 @@ class HDF5Explorer:
     Useful for interactive exploration of large HDF5 files in IPython/Jupyter.
     """
 
-    def __init__(self, hdf5_filepath: PathOrStr, load_less_than: float = 1e3):
+    def __init__(  # noqa: D107
+        self, hdf5_filepath: PathOrStr, load_less_than: float = 1e3
+    ):
         self.hdf5_filepath = hdf5_filepath
         self._hf = h5py.File(hdf5_filepath, "r")
         self._root_group = _HDF5GroupExplorer(
@@ -62,16 +68,21 @@ class _HDF5GroupExplorer:
 
     def __getattr__(self, name):
         if name not in self._attr_cache:
-            raise AttributeError(
-                f"'{name}' not found in the group '{self.group_path}'."
-            )
+            msg = f"'{name}' not found in the group '{self.group_path}'."
+            raise AttributeError(msg)
         return self._attr_cache[name]
 
     def __dir__(self):
         return list(self._attr_cache.keys())
 
 
-def create_explorer_widget(hf: h5py.File, load_less_than: float = 1e3):
+def create_explorer_widget(
+    hf: h5py.File,
+    load_less_than: float = 1e3,
+    subsample: tuple[int, int] = (10, 10),
+    cmap: str = "gray",
+    interpolation: str = "nearest",
+):
     """Make a widget in Jupyter to explore a h5py file.
 
     Requires `ipywidgets` and `matplotlib` to be installed.
@@ -81,16 +92,19 @@ def create_explorer_widget(hf: h5py.File, load_less_than: float = 1e3):
     --------
     >>> hf = h5py.File("file.h5", "r") # doctest: +SKIP
     >>> create_explorer_widget(hf) # doctest: +SKIP
-    """
-    from io import BytesIO
 
-    import ipywidgets as widgets
-    import matplotlib.pyplot as plt
+    """
+    sub_row, sub_col = subsample
 
     def _make_thumbnail(image):
         # Create a thumbnail of the dataset
         fig, ax = plt.subplots(figsize=(5, 5))
-        ax.imshow(image, cmap="gray", vmax=np.nanpercentile(image, 99))
+        ax.imshow(
+            image,
+            cmap=cmap,
+            interpolation=interpolation,
+            vmax=np.nanpercentile(image, 99),
+        )
         ax.axis("off")
         buf = BytesIO()
         plt.savefig(buf, format="png", dpi=150)
@@ -119,10 +133,12 @@ def create_explorer_widget(hf: h5py.File, load_less_than: float = 1e3):
                 content += f"<br>Value: {item[()]}"
             html_widget = widgets.HTML(content)
 
-            if not item.ndim == 2 or not item.dtype == np.complex64:
+            if item.ndim != 2:
                 return html_widget
-            # If the dataset is a 2D complex array, make a thumbnail
-            image_widget = _make_thumbnail(np.abs(item[::5, ::10]))
+            # If the dataset is a 2D array, make a thumbnail
+            # Handle the real or complex the same
+            data = np.abs(item[::sub_row, ::sub_col])
+            image_widget = _make_thumbnail(data)
             return widgets.VBox([image_widget, html_widget])
 
         else:

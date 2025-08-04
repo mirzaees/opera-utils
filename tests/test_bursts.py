@@ -5,8 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from opera_utils import filter_by_burst_id, get_burst_id, group_by_burst
+from opera_utils import (
+    filter_by_burst_id,
+    get_burst_id,
+    group_by_burst,
+    normalize_burst_id,
+)
 from opera_utils._helpers import flatten
+
+
+def test_normalize():
+    expected = "t087_165495_iw3"
+    assert expected == normalize_burst_id("T087-165495-IW3")
+    assert expected == normalize_burst_id("T087_165495_IW3")
+    assert expected == normalize_burst_id("t087_165495_IW3")
+    assert expected == normalize_burst_id("t087_165495_iw3")
+    assert expected == normalize_burst_id("t087-165495-iw3")
 
 
 def test_get_burst_id():
@@ -15,7 +29,7 @@ def test_get_burst_id():
         == "t087_185678_iw2"
     )
     # Check the official naming convention
-    fn = "OPERA_L2_CSLC-S1_T087-185678-IW2_20180210T232711Z_20230101T100506Z_S1A_VV_v1.0.h5"  # noqa
+    fn = "OPERA_L2_CSLC-S1_T087-185678-IW2_20180210T232711Z_20230101T100506Z_S1A_VV_v1.0.h5"
     assert get_burst_id(fn) == "t087_185678_iw2"
 
 
@@ -76,6 +90,7 @@ def test_group_by_burst_product_version():
 def test_group_by_burst_non_opera():
     with pytest.raises(ValueError, match="Could not parse burst id"):
         group_by_burst(["20200101.slc", "20200202.slc"])
+    with pytest.raises(ValueError, match="Could not parse burst id"):
         # A combination should still error
         group_by_burst(
             [

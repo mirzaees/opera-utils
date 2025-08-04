@@ -9,28 +9,39 @@ authors = [
 ]
 description = "Miscellaneous utilities for working with OPERA data products"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 
 classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.8",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Python",
   "Topic :: Scientific/Engineering",
   "Typing :: Typed",
 ]
 license = { file = "LICENSE.txt" }
 
+dependencies = [
+  "h5py>=1.10",
+  "numpy>=1.24",
+  "pooch>=1.7",
+  "pyproj>=3.3",
+  "shapely>=1.8",
+  "typing_extensions>=4",
+  "tyro>=0.9",
+]
+
+
 # The version will be written into a version.py upon install, auto-generated
 # see section: setuptools_scm
 # https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html#dynamic-metadata
 # dependencies will be read from text files
-dynamic = ["version", "dependencies", "optional-dependencies"]
+dynamic = ["version"]
 
 [project.urls]
 Homepage = "https://github.com/opera-adt/opera-utils"
@@ -40,16 +51,54 @@ Changelog = "https://github.com/opera-adt/opera-utils/releases"
 
 # Entry points for the command line interface
 [project.scripts]
-opera_utils = "opera_utils.cli:main"
+opera-utils = "opera_utils.cli:cli_app"
 
-[tool.setuptools.dynamic]
-dependencies = { file = ["requirements.txt"] }
+# extra requirements: `pip install .[docs]` or `pip install .[test]`
+[project.optional-dependencies]
+# For geopandas functionality with burst/frame databases:
+geopandas = ["geopandas", "pyogrio"]
+# Work with DISP data - downloads and subsetting
+disp = [
+  "affine",
+  "aiohttp",
+  "botocore",
+  "dask",
+  "fsspec",
+  "h5netcdf",
+  "s3fs",
+  "tqdm",
+  "rasterio",
+  "xarray",
+  "zarr>=3",
+]
+cslc = ["asf_search"]
+all = ["opera-utils[cslc,disp,geopandas]"]
 
-# extra requirements: `pip install .[docs]` or `pip install .[docs]`
-[tool.setuptools.dynamic.optional-dependencies.docs]
-file = ["docs/requirements.txt"]
-[tool.setuptools.dynamic.optional-dependencies.test]
-file = ["tests/requirements.txt"]
+test = [
+  "asf_search",
+  "pre-commit",
+  "pytest",
+  "pytest-cov",
+  "pytest-randomly",
+  "pytest-recording",
+  "pytest-xdist",
+  "ruff",
+  "geopandas",
+  "pyogrio",
+  "ipywidgets",
+  "matplotlib",
+]
+docs = [
+  "mkdocs",
+  "mkdocs-gen-files",
+  "mkdocs-jupyter",
+  "mkdocs-literate-nav",
+  "mkdocs-material",
+  "mkdocs-section-index",
+  "mkdocstrings[python]",
+  "pybtex",               # for mdx_bib
+  "pymdown-extensions",
+]
 
 [tool.setuptools_scm]
 # https://github.com/pypa/setuptools_scm#configuration-parameters
@@ -57,31 +106,84 @@ write_to = "src/opera_utils/_version.py"
 # https://github.com/pypa/setuptools_scm#version-number-construction
 version_scheme = "no-guess-dev" # Will not guess the next version
 
-
 [tool.ruff]
 src = ["src"]
+unsafe-fixes = true
 
 [tool.ruff.lint]
-# Enable the isort rules.
-extend-select = ["I"]
+select = [
+  "A",      # flake8-builtins
+  "ARG",    # flake8-unused-arguments
+  "B",      # flake8-bugbear
+  "C4",     # flake8-comprehensions
+  "D",      # pydocstyle
+  "E",      # pycodestyle (errors)
+  "W",      # pycodestyle (warnings)
+  "EM",     # flake8-errmsg
+  "EXE",    # flake8-executable
+  "F",      # Pyflakes
+  "I",      # isort
+  "ISC",    # flake8-implicit-str-concat
+  "N",      # pep8-naming
+  "NPY201", # numpy 2.0 depgrcations
+  "PGH",    # pygrep-hooks
+  "PIE",    # flake8-pie
+  "PL",     # Pylint
+  "PT",     # flake8-pytest-style
+  "PTH",    # flake8-use-pathlib
+  "PYI",    # flake8-pyi
+  "RUF",    # Ruff-specific rules
+  "SIM",    # flake8-simplify
+  "TRY",    # tryceratops
+  "UP",     # pyupgrade  <- not working with Pydantic lower python versions
+  "YTT",    # flake8-2020
+]
+
+ignore = [
+  "PTH123", # `open()` should be replaced by `Path.open()`
+  "PLR",    # Pylint Refactor
+  "D100",   # Missing docstring in public module
+  "D104",   # Missing docstring in public package
+  "D105",   # Missing docstring in magic method
+  "D102",   # D102: Missing docstring in public method (TODO: remove this ignore)
+  "D213",   # D213: Multi-line docstring summary should start at the second line
+  "D203",   # 1 blank line required before class docstring
+  "N806",   # Variable _ in function should be lowercase
+  "SIM108", # Use ternary operator
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/opera_utils/cli.py" = ["PLC0415"]
+"**/__init__.py" = ["F401", "F403"]
+"tests/**" = [
+  "D",
+  "N",
+  "PTH",
+  "ARG001",
+  "PLR2004",
+  "E501",
+  "PLC0415",
+  "PLC2701",
+]
+"src/opera_utils/datasets.py" = ["E501"] # Line too long
+"scripts/*" = ["F401", "PLC2701"]
+"docs/notebooks/*" = ["B018", "E402", "E501"]
 
 [tool.black]
-target-version = ["py39", "py310", "py311", "py312"]
+target-version = ["py39", "py310", "py311", "py312", "py313"]
 preview = true
 
-[tool.isort]
-profile = "black"
-known_first_party = [" opera_utils"]
-
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
 
 
-[tool.pydocstyle]
-ignore = "D100,D102,D104,D105,D106,D107,D203,D204,D213,D413"
-
 [tool.pytest.ini_options]
 doctest_optionflags = "NORMALIZE_WHITESPACE NUMBER"
-addopts = "  --cov=opera_utils  --doctest-modules --randomly-seed=1234 --ignore=scripts --ignore=docs"
-filterwarnings = ["error"]
+addopts = "  --cov=opera_utils  --doctest-modules --randomly-seed=1234 --ignore=scripts --ignore=docs --ignore=data"
+filterwarnings = [
+  "error",
+  # https://github.com/dateutil/dateutil/pull/1285 will be released, but not yet
+  "ignore:datetime.datetime.utcfromtimestamp.*:DeprecationWarning",
+  "ignore:.*shapely.geos.*:DeprecationWarning",
+]
