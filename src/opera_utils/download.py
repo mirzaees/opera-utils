@@ -596,11 +596,53 @@ def get_urls(
 
 
 def _get_auth_session() -> asf.ASFSession:
+    """Authenticate using .netrc credentials.
+
+    If errors, then fall back to ~/.earthdata_token if netrc fails or
+    credentials cannot be found.
+    """
     host = "urs.earthdata.nasa.gov"
 
-    auth = netrc.netrc().authenticators(host)
-    if auth is None:
-        msg = f"No .netrc entry found for {host}"
-        raise ValueError(msg)
-    username, _, password = auth
-    return asf.ASFSession().auth_with_creds(username, password)
+    # --- Attempt 1: Authenticate with .netrc credentials ---
+    try:
+        # We expect a FileNotFoundError or NetrcParseError if .netrc is
+        # missing or malformed.
+        auth = netrc.netrc().authenticators(host)
+
+        if auth is not None:
+            username, _, password = auth
+            return asf.ASFSession().auth_with_creds(username, password)
+
+        # If the file exists but no entry for 'host' is found, auth is None.
+        # This is the expected point to fall through to the token method.
+        # If we reach here, we move on to the token logic.
+
+    except (FileNotFoundError, netrc.NetrcParseError):
+        # If .netrc doesn't exist or is invalid, we proceed to the token method.
+        # It's better to log 'e' than to raise it here.
+        pass  # Proceed to token-based authentication
+
+    # --- Attempt 2: Authenticate with token from ~/.earthdata_token ---
+    token_file = Path.home() / ".earthdata_token"
+
+    # Check if the token file exists before trying to read it.
+    if token_file.exists():
+        try:
+            token = token_file.read_text().strip()
+
+            if token:
+                return asf.ASFSession().auth_with_token(token)
+
+        except OSError:
+            # Handle file read errors (e.g., permission denied)
+            # Log the exception 'e' but continue to the final error message.
+            pass
+
+    # --- Final Failure: Raise a comprehensive error ---
+    # Raise a clear error message if both methods failed.
+    msg = (
+        "Authentication failed: Could not find valid credentials in either "
+        f"~/.netrc (for host {host}) or in ~/.earthdata_token."
+    )
+
+    raise ValueError(msg)
