@@ -7,9 +7,11 @@ import urllib.parse
 from collections.abc import Sequence
 from enum import Enum
 from itertools import groupby
+from netrc import NetrcParseError
 from pathlib import Path
 from typing import Literal, Union
 
+from asf_search.exceptions import ASFAuthenticationError
 from packaging.version import parse
 from shapely.geometry import box
 
@@ -617,7 +619,7 @@ def _get_auth_session() -> asf.ASFSession:
         # This is the expected point to fall through to the token method.
         # If we reach here, we move on to the token logic.
 
-    except (FileNotFoundError, netrc.NetrcParseError):
+    except (FileNotFoundError, NetrcParseError, ASFAuthenticationError):
         # If .netrc doesn't exist or is invalid, we proceed to the token method.
         # It's better to log 'e' than to raise it here.
         pass  # Proceed to token-based authentication
