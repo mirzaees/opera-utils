@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 # /// script
+# requires-python = ">=3.11"
 # dependencies = [
-#  "matplotlib"
-#  "pykdtree"
-#  "cartopy"
-#  "geopandas"
-#  "shapely"
-#  "opera_utils"
-#  "tyro"
+#  "matplotlib",
+#  "pykdtree",
+#  "cartopy",
+#  "geopandas",
+#  "shapely",
+#  "opera_utils",
+#  "tyro",
 # ]
 # ///
 """Plot a DISP-S1 frame on a background map.

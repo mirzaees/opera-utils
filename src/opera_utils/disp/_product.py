@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import os
-from collections import Counter
+import warnings
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from functools import cached_property
 from math import nan
 from pathlib import Path
@@ -18,6 +18,7 @@ import pyproj
 from affine import Affine
 from typing_extensions import Self
 
+from opera_utils._cmr import get_download_url
 from opera_utils.burst_frame_db import (
     Bbox,
     OrbitPass,
@@ -25,21 +26,11 @@ from opera_utils.burst_frame_db import (
     get_frame_geojson,
     get_frame_orbit_pass,
 )
-from opera_utils.constants import DISP_FILE_REGEX
+from opera_utils.constants import DISP_FILE_REGEX, UrlType
 
 from ._utils import get_frame_coordinates
 
 __all__ = ["DispProduct", "DispProductStack", "UrlType"]
-
-
-class UrlType(str, Enum):
-    """Choices for the orbit direction of a granule."""
-
-    S3 = "s3"
-    HTTPS = "https"
-
-    def __str__(self) -> str:
-        return str(self.value)
 
 
 @dataclass
@@ -209,7 +200,7 @@ class DispProduct:
             If required temporal extent data is missing.
 
         """
-        url = _get_download_url(umm_data, protocol=url_type)
+        url = get_download_url(umm_data, protocol=url_type)
         product = DispProduct.from_filename(url)
         archive_info = umm_data.get("DataGranule", {}).get(
             "ArchiveAndDistributionInformation", []
@@ -232,14 +223,48 @@ class DispProductStack:
         if len({p.frame_id for p in self.products}) != 1:
             msg = "All products must have the same frame_id"
             raise ValueError(msg)
-        # Check for duplicates
+        # Check for duplicates and filter them
         if len(set(self.ifg_date_pairs)) != len(self.products):
+            # Group products by their date pairs
+            date_pair_groups = defaultdict(list)
+            for p in self.products:
+                date_pair_groups[p.reference_datetime, p.secondary_datetime].append(p)
+
+            filtered_products = []
+            removed_count = 0
+            for _date_pair, group in date_pair_groups.items():
+                if len(group) > 1:
+                    # Sort by version (descending) then generation_datetime (descending)
+                    sorted_group = sorted(
+                        group,
+                        # keep most latest version, then most recent generation time
+                        key=lambda p: (p.version, p.generation_datetime),
+                        reverse=True,
+                    )
+                    filtered_products.append(sorted_group[0])
+                    removed_count += len(group) - 1
+                else:
+                    filtered_products.append(group[0])
+
+            # Issue warning
             version_count = Counter(p.version for p in self.products)
-            msg = "All products must have unique reference and secondary dates."
-            msg += f" Got {len(set(self.ifg_date_pairs))} unique pairs: "
-            msg += f"but {len(self.products)} products."
+            msg = (
+                f"Found {removed_count} duplicate product(s) with same"
+                " reference/secondary dates. "
+            )
+            msg += "Keeping most recent version and generation time. "
+            msg += (
+                f"Original: {len(self.products)} products, Filtered:"
+                f" {len(filtered_products)} products. "
+            )
             msg += f"Versions: {version_count.most_common()}"
-            raise ValueError(msg)
+            warnings.warn(msg, UserWarning, stacklevel=2)
+
+            # Update products list with filtered version, maintaining sort order
+            self.products = sorted(
+                filtered_products,
+                key=lambda p: (p.reference_datetime, p.secondary_datetime),
+            )
         # TODO: SORT!
 
     @classmethod
@@ -322,41 +347,6 @@ class DispProductStack:
     def to_dataframe(self) -> pd.DataFrame:
         """Create a DataFrame holding the product stack metadata."""
         return pd.DataFrame([asdict(p) for p in self.products])
-
-
-def _get_download_url(
-    umm_data: dict[str, Any], protocol: UrlType = UrlType.HTTPS
-) -> str:
-    """Extract a download URL from the product's UMM metadata.
-
-    Parameters
-    ----------
-    umm_data : dict[str, Any]
-        The product's umm metadata dictionary
-    protocol : UrlType
-        The protocol to use for downloading, either "s3" or "https"
-
-    Returns
-    -------
-    str
-        The download URL
-
-    Raises
-    ------
-    ValueError
-        If no URL with the specified protocol is found or if the protocol is invalid
-
-    """
-    if protocol not in ["https", "s3"]:
-        msg = f"Unknown protocol {protocol}; must be https or s3"
-        raise ValueError(msg)
-
-    for url in umm_data["RelatedUrls"]:
-        if url["Type"].startswith("GET DATA") and url["URL"].startswith(protocol):
-            return url["URL"]
-
-    msg = f"No download URL found for granule {umm_data['GranuleUR']}"
-    raise ValueError(msg)
 
 
 class OutOfBoundsError(ValueError):

@@ -68,11 +68,20 @@ disp = [
   "s3fs",
   "tqdm",
   "rasterio",
+  "rioxarray",
   "xarray",
   "zarr>=3",
 ]
-cslc = ["asf_search"]
-all = ["opera-utils[cslc,disp,geopandas]"]
+tropo = ["opera-utils[disp]", "rioxarray", "scipy"]
+asf = ["asf_search"]
+# Work with NISAR GSLC data - downloads and subsetting
+nisar = [
+  "aiohttp",
+  "fsspec",
+  "s3fs",
+  "tqdm",
+]
+all = ["opera-utils[tropo,asf,disp,geopandas,nisar]"]
 
 test = [
   "asf_search",
