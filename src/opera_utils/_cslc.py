@@ -539,7 +539,26 @@ def get_union_polygon(
         Buffer the polygons by this many degrees, by default 0.0
 
     """
-    polygons = [get_cslc_polygon(f, buffer_degrees) for f in opera_file_list]
+    # Filter out VSI paths (h5py cannot open them)
+    # For GDAL VSI paths like /vsis3/, /vsicurl/, etc., skip them
+    # When streaming from S3, typically the first file is downloaded locally for metadata
+    local_files = [f for f in opera_file_list if not str(f).startswith('/vsi')]
+
+    if local_files:
+        # Use ALL local files for better polygon union
+        # If only streaming with 1 local file, we get 1 polygon
+        # If all files downloaded locally, we get union of all polygons (better coverage)
+        files_to_use = local_files
+        logger.info(f"Using {len(local_files)} local file(s) for nodata mask polygon extraction")
+    else:
+        # Fallback: use first file (may fail if it's a VSI path, but caught by try-except)
+        files_to_use = opera_file_list[:1]
+        logger.warning(
+            "No local files found; attempting to use first file for polygon extraction. "
+            "This may fail if using VSI paths."
+        )
+
+    polygons = [get_cslc_polygon(f, buffer_degrees) for f in files_to_use]
     polygons = [p for p in polygons if p is not None]
 
     if len(polygons) == 0:
@@ -594,12 +613,37 @@ def create_nodata_mask(
     if dset_name:
         dataset_name = dset_name
     else:
+        # For get_dataset_name, need a local file (uses h5py internally)
+        # Filter out VSI paths
+        local_files = [f for f in opera_file_list if not str(f).startswith('/vsi')]
+        reference_file = local_files[0] if local_files else opera_file_list[0]
+
+        logger.info(f"Creating nodata mask: found {len(local_files)} local files out of {len(opera_file_list)} total")
+        logger.info(f"Using reference file for metadata: {reference_file}")
+
+        # Verify the reference file exists if it's a local path
+        if not str(reference_file).startswith('/vsi') and not Path(reference_file).exists():
+            logger.error(f"Local reference file does not exist: {reference_file}")
+            raise FileNotFoundError(f"Local reference file not found: {reference_file}")
+
         try:
-            dataset_name = get_dataset_name(opera_file_list[-1])
+            dataset_name = get_dataset_name(reference_file)
         except CslcParseError as e:
-            msg = f"{opera_file_list[-1]} is not a CSLC file"
+            msg = f"{reference_file} is not a CSLC file"
+            raise ValueError(msg) from e
+        except Exception as e:
+            # If h5py fails on a VSI path, provide helpful error message
+            if str(reference_file).startswith('/vsi'):
+                msg = (
+                    f"Cannot open VSI path with h5py: {reference_file}. "
+                    "h5py does not support GDAL virtual file systems. "
+                    "Ensure at least one file is downloaded locally for metadata extraction."
+                )
+            else:
+                msg = f"Could not get dataset name from {reference_file}: {e}"
             raise ValueError(msg) from e
 
+    # For GDAL operations, can use VSI paths (use last file as before)
     try:
         test_f = f"NETCDF:{opera_file_list[-1]}:{dataset_name}"
         # convert pixels to degrees lat/lon
