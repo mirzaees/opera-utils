@@ -66,12 +66,15 @@ def format_nc_filename(filename: PathOrStr, ds_name: str | None = None) -> str:
         msg = "Must provide dataset name for HDF5/NetCDF files"
         raise ValueError(msg)
 
-    # Don't quote VSI paths - GDAL needs them unquoted
+    # Determine driver based on file extension
     filename_str = str(filename)
+    driver = "HDF5" if filename_str.endswith(".h5") else "NETCDF"
+
+    # Don't quote VSI paths - GDAL needs them unquoted
     if filename_str.startswith("/vsi"):
-        return f'NETCDF:{filename_str}://{ds_name.lstrip("/")}'
+        return f'{driver}:{filename_str}://{ds_name.lstrip("/")}'
     else:
-        return f'NETCDF:"{filename}":"//{ds_name.lstrip("/")}"'
+        return f'{driver}:"{filename}":"//{ds_name.lstrip("/")}"'
 
 
 def _get_path_from_gdal_str(name: PathOrStr) -> Path:

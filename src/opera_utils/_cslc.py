@@ -704,8 +704,10 @@ def create_nodata_mask(
             raise ValueError(msg) from e
 
     # For GDAL operations, can use VSI paths (use last file as before)
+    from opera_utils._utils import format_nc_filename
+
     try:
-        test_f = f"NETCDF:{opera_file_list[-1]}:{dataset_name}"
+        test_f = format_nc_filename(opera_file_list[-1], dataset_name)
         # convert pixels to degrees lat/lon
         gt = _get_raster_gt(test_f)
     except RuntimeError as e:
@@ -724,7 +726,9 @@ def create_nodata_mask(
     # Make a dummy raster from the last file with all 0s
     # This will get filled in with the polygon rasterization
     # Use GDAL Python API directly instead of subprocess (much faster!)
-    test_f_str = f"NETCDF:{opera_file_list[-1]}:{dataset_name}"
+    from opera_utils._utils import format_nc_filename
+
+    test_f_str = format_nc_filename(opera_file_list[-1], dataset_name)
     src_ds = gdal.Open(test_f_str, gdal.GA_ReadOnly)
     if src_ds is None:
         msg = f"Could not open {test_f_str} to get dimensions"
