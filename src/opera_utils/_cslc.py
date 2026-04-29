@@ -269,11 +269,44 @@ def _get_dset_and_attrs(
         Attributes.
 
     """
-    with h5py.File(filename, "r") as hf:
-        dset = hf[dset_name]
-        attrs = dict(dset.attrs)
-        value = parse_func(dset[()])
+    # Handle VSI paths with GDAL/HDF5 driver
+    filename_str = str(filename)
+    if filename_str.startswith("/vsi"):
+        if not HAS_GDAL:
+            msg = "GDAL is required to read VSI paths but is not installed"
+            raise ImportError(msg)
+
+        # For VSI paths, use GDAL's HDF5 driver with subdataset notation
+        # This allows reading HDF5 datasets through GDAL VSI layer
+        subdataset_path = f"HDF5:{filename_str}:{dset_name}"
+        ds = gdal.Open(subdataset_path, gdal.GA_ReadOnly)
+        if ds is None:
+            msg = f"Could not open {dset_name} from {filename_str}"
+            raise ValueError(msg)
+
+        # Read the value - for scalar datasets, GDAL creates 1x1 raster
+        band = ds.GetRasterBand(1)
+        arr = band.ReadAsArray()
+
+        # Extract scalar if it's a 1x1 array
+        if arr.size == 1:
+            raw_value = arr.item()
+        else:
+            raw_value = arr
+
+        # Get metadata (attributes stored as GDAL metadata)
+        attrs = ds.GetMetadata_Dict()
+
+        ds = None
+        value = parse_func(raw_value)
         return value, attrs
+    else:
+        # Use h5py for local files
+        with h5py.File(filename, "r") as hf:
+            dset = hf[dset_name]
+            attrs = dict(dset.attrs)
+            value = parse_func(dset[()])
+            return value, attrs
 
 
 def get_radar_wavelength(filename: Filename) -> float:
@@ -518,11 +551,30 @@ def get_cslc_polygon(
         dset_name = NISAR_BOUNDING_POLYGON
     else:
         dset_name = f"{OPERA_IDENTIFICATION}/bounding_polygon"
-    with h5py.File(opera_file) as hf:
-        if dset_name not in hf:
+
+    opera_str = str(opera_file)
+    if opera_str.startswith("/vsi"):
+        # Use GDAL for VSI paths
+        if not HAS_GDAL:
+            msg = "GDAL is required to read VSI paths but is not installed"
+            raise ImportError(msg)
+
+        ds = gdal.Open(f"HDF5:{opera_str}:{dset_name}", gdal.GA_ReadOnly)
+        if ds is None:
             logger.debug(f"Could not find {dset_name} in {opera_file}")
             return None
-        wkt_str = hf[dset_name][()].decode("utf-8")
+        wkt_str = ds.ReadAsArray().item()
+        if isinstance(wkt_str, bytes):
+            wkt_str = wkt_str.decode("utf-8")
+        ds = None
+    else:
+        # Use h5py for local files
+        with h5py.File(opera_file) as hf:
+            if dset_name not in hf:
+                logger.debug(f"Could not find {dset_name} in {opera_file}")
+                return None
+            wkt_str = hf[dset_name][()].decode("utf-8")
+
     return wkt.loads(wkt_str).buffer(buffer_degrees)
 
 
