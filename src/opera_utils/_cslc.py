@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 import tempfile
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
@@ -722,16 +721,44 @@ def create_nodata_mask(
     union_poly = get_union_polygon(opera_file_list, buffer_degrees=buffer_degrees)
     # convert shapely polygon to geojson
 
-    # Make a dummy raster from the first file with all 0s
+    # Make a dummy raster from the last file with all 0s
     # This will get filled in with the polygon rasterization
-    cmd = (
-        f"gdal_calc.py --quiet --outfile {out_file} --type Byte  -A"
-        f" NETCDF:{opera_file_list[-1]}:{dataset_name} --calc 'numpy.nan_to_num(A)"
-        " * 0' --creation-option COMPRESS=LZW --creation-option TILED=YES"
-        " --creation-option BLOCKXSIZE=256 --creation-option BLOCKYSIZE=256"
-    )
-    logger.info(cmd)
-    subprocess.check_call(cmd, shell=True)
+    # Use GDAL Python API directly instead of subprocess (much faster!)
+    test_f_str = f"NETCDF:{opera_file_list[-1]}:{dataset_name}"
+    src_ds = gdal.Open(test_f_str, gdal.GA_ReadOnly)
+    if src_ds is None:
+        msg = f"Could not open {test_f_str} to get dimensions"
+        raise ValueError(msg)
+
+    # Get dimensions and georeferencing
+    xsize = src_ds.RasterXSize
+    ysize = src_ds.RasterYSize
+    projection = src_ds.GetProjection()
+    geotransform = src_ds.GetGeoTransform()
+    src_ds = None
+
+    # Create output raster directly with GDAL
+    driver = gdal.GetDriverByName("GTiff")
+    options = [
+        "COMPRESS=LZW",
+        "TILED=YES",
+        "BLOCKXSIZE=256",
+        "BLOCKYSIZE=256",
+    ]
+    dst_ds = driver.Create(fspath(out_file), xsize, ysize, 1, gdal.GDT_Byte, options)
+    if dst_ds is None:
+        msg = f"Could not create {out_file}"
+        raise ValueError(msg)
+
+    dst_ds.SetGeoTransform(geotransform)
+    dst_ds.SetProjection(projection)
+    dst_band = dst_ds.GetRasterBand(1)
+    dst_band.SetNoDataValue(0)
+    # Initialize with zeros (will be overwritten by polygon rasterization)
+    dst_band.Fill(0)
+    dst_band.FlushCache()
+    dst_ds = None
+    logger.info(f"Created empty mask raster: {out_file}")
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_vector_file = Path(tmpdir) / "temp.geojson"
         with open(temp_vector_file, "w", encoding="utf-8") as f:
