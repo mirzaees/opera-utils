@@ -72,9 +72,14 @@ def format_nc_filename(filename: PathOrStr, ds_name: str | None = None) -> str:
 
     # Don't quote VSI paths - GDAL needs them unquoted
     if filename_str.startswith("/vsi"):
-        return f'{driver}:{filename_str}://{ds_name.lstrip("/")}'
+        result = f'{driver}:{filename_str}://{ds_name.lstrip("/")}'
     else:
-        return f'{driver}:"{filename}":"//{ds_name.lstrip("/")}"'
+        result = f'{driver}:"{filename}":"//{ds_name.lstrip("/")}"'
+
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"format_nc_filename: {filename} -> {result}")
+    return result
 
 
 def _get_path_from_gdal_str(name: PathOrStr) -> Path:
