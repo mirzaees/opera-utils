@@ -757,7 +757,8 @@ def create_nodata_mask(
     dst_ds.SetGeoTransform(geotransform)
     dst_ds.SetProjection(projection)
 
-    # Set SRS from projection string for proper georeferencing
+    # CRITICAL: Set SRS for GDAL 3+ compatibility
+    # Without this, gdal.Rasterize will fail with SRS mismatch warnings
     from osgeo import osr
     srs = osr.SpatialReference()
     srs.ImportFromWkt(projection)
@@ -770,34 +771,16 @@ def create_nodata_mask(
     dst_band.FlushCache()
     dst_band = None
 
-    # Keep dst_ds open for rasterization instead of closing and reopening
     logger.info(f"Created empty mask raster: {out_file}")
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_vector_file = Path(tmpdir) / "temp.geojson"
-
-        # Create GeoJSON with CRS information
-        # The polygon from get_cslc_polygon is in lat/lon (EPSG:4326)
-        geojson_dict = {
-            "type": "FeatureCollection",
-            "crs": {
-                "type": "name",
-                "properties": {"name": "EPSG:4326"}
-            },
-            "features": [{
-                "type": "Feature",
-                "geometry": geometry.mapping(union_poly),
-                "properties": {}
-            }]
-        }
-
         with open(temp_vector_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(geojson_dict))
+            f.write(json.dumps(geometry.mapping(union_poly)))
 
         # Open the input vector file
         src_ds = gdal.OpenEx(fspath(temp_vector_file), gdal.OF_VECTOR)
 
         # Now burn in the union of all polygons (dst_ds is still open)
-        # GDAL will automatically reproject from EPSG:4326 to the raster's CRS
         gdal.Rasterize(dst_ds, src_ds, burnValues=[1])
 
     # Close the dataset after rasterization
