@@ -756,12 +756,21 @@ def create_nodata_mask(
 
     dst_ds.SetGeoTransform(geotransform)
     dst_ds.SetProjection(projection)
+
+    # Set SRS from projection string for proper georeferencing
+    from osgeo import osr
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(projection)
+    dst_ds.SetSpatialRef(srs)
+
     dst_band = dst_ds.GetRasterBand(1)
     dst_band.SetNoDataValue(0)
     # Initialize with zeros (will be overwritten by polygon rasterization)
     dst_band.Fill(0)
     dst_band.FlushCache()
-    dst_ds = None
+    dst_band = None
+
+    # Keep dst_ds open for rasterization instead of closing and reopening
     logger.info(f"Created empty mask raster: {out_file}")
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_vector_file = Path(tmpdir) / "temp.geojson"
@@ -770,10 +779,12 @@ def create_nodata_mask(
 
         # Open the input vector file
         src_ds = gdal.OpenEx(fspath(temp_vector_file), gdal.OF_VECTOR)
-        dst_ds = gdal.Open(fspath(out_file), gdal.GA_Update)
 
-        # Now burn in the union of all polygons
+        # Now burn in the union of all polygons (dst_ds is still open)
         gdal.Rasterize(dst_ds, src_ds, burnValues=[1])
+
+    # Close the dataset after rasterization
+    dst_ds = None
 
 
 make_nodata_mask = create_nodata_mask
