@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
@@ -27,6 +28,8 @@ __all__ = [
     "scratch_directory",
     "transform_xy_to_latlon",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 def format_nc_filename(filename: PathOrStr, ds_name: str | None = None) -> str:
@@ -77,8 +80,6 @@ def format_nc_filename(filename: PathOrStr, ds_name: str | None = None) -> str:
     else:
         result = f'NETCDF:"{filename}":"//{ds_name.lstrip("/")}"'
 
-    import logging
-    logger = logging.getLogger(__name__)
     logger.debug(f"format_nc_filename: {filename} -> {result}")
     return result
 
