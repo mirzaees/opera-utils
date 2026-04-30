@@ -275,9 +275,9 @@ def _get_dset_and_attrs(
             msg = "GDAL is required to read VSI paths but is not installed"
             raise ImportError(msg)
 
-        # For VSI paths, use GDAL's HDF5 driver with subdataset notation
-        # This allows reading HDF5 datasets through GDAL VSI layer
-        subdataset_path = f"HDF5:{filename_str}:{dset_name}"
+        # For VSI paths, use GDAL's NETCDF driver with subdataset notation
+        # NISAR files are NetCDF4 format (use HDF5 container but need NETCDF driver)
+        subdataset_path = f"NETCDF:{filename_str}:{dset_name}"
         ds = gdal.Open(subdataset_path, gdal.GA_ReadOnly)
         if ds is None:
             msg = f"Could not open {dset_name} from {filename_str}"
@@ -558,7 +558,7 @@ def get_cslc_polygon(
             msg = "GDAL is required to read VSI paths but is not installed"
             raise ImportError(msg)
 
-        ds = gdal.Open(f"HDF5:{opera_str}:{dset_name}", gdal.GA_ReadOnly)
+        ds = gdal.Open(f"NETCDF:{opera_str}:{dset_name}", gdal.GA_ReadOnly)
         if ds is None:
             logger.debug(f"Could not find {dset_name} in {opera_file}")
             return None
