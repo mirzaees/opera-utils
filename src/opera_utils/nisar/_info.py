@@ -28,7 +28,8 @@ __all__ = [
 def load_gpkg(gpkg_path: Path) -> gpd.GeoDataFrame:
     """Load the NISAR frames GeoPackage indexed by frame_idx."""
     gdf = gpd.read_file(gpkg_path)
-    gdf = gdf.set_index("frame_idx")
+    # gdf = gdf.set_index("frame_idx")
+    gdf = gdf.set_index("frame")
     return gdf
 
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
 import tempfile
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from os import fspath
 from pathlib import Path
@@ -270,35 +272,17 @@ def _get_dset_and_attrs(
         Attributes.
 
     """
-    # Handle VSI paths with GDAL/HDF5 driver
+    # Handle VSI paths with GDAL's multidim API (h5py can't open /vsis3).
     filename_str = str(filename)
     if filename_str.startswith("/vsi"):
         if not HAS_GDAL:
             msg = "GDAL is required to read VSI paths but is not installed"
             raise ImportError(msg)
 
-        # For VSI paths, use GDAL's NETCDF driver with subdataset notation
-        # NISAR files are NetCDF4 format (use HDF5 container but need NETCDF driver)
-        subdataset_path = f"NETCDF:{filename_str}:{dset_name}"
-        ds = gdal.Open(subdataset_path, gdal.GA_ReadOnly)
-        if ds is None:
+        raw_value, attrs = _read_scalar_mdarray(filename_str, dset_name)
+        if raw_value is None:
             msg = f"Could not open {dset_name} from {filename_str}"
             raise ValueError(msg)
-
-        # Read the value - for scalar datasets, GDAL creates 1x1 raster
-        band = ds.GetRasterBand(1)
-        arr = band.ReadAsArray()
-
-        # Extract scalar if it's a 1x1 array
-        if arr.size == 1:
-            raw_value = arr.item()
-        else:
-            raw_value = arr
-
-        # Get metadata (attributes stored as GDAL metadata)
-        attrs = ds.GetMetadata_Dict()
-
-        ds = None
         value = parse_func(raw_value)
         return value, attrs
     else:
@@ -555,19 +539,16 @@ def get_cslc_polygon(
 
     opera_str = str(opera_file)
     if opera_str.startswith("/vsi"):
-        # Use GDAL for VSI paths
+        # Use GDAL's multidim API for VSI paths — the 2D raster API can't read
+        # scalar string MDArrays, and the HDF5 driver does ranged S3 reads.
         if not HAS_GDAL:
             msg = "GDAL is required to read VSI paths but is not installed"
             raise ImportError(msg)
 
-        ds = gdal.Open(f"NETCDF:{opera_str}:{dset_name}", gdal.GA_ReadOnly)
-        if ds is None:
+        wkt_str = _read_string_mdarray(opera_str, dset_name)
+        if wkt_str is None:
             logger.debug(f"Could not find {dset_name} in {opera_file}")
             return None
-        wkt_str = ds.ReadAsArray().item()
-        if isinstance(wkt_str, bytes):
-            wkt_str = wkt_str.decode("utf-8")
-        ds = None
     else:
         # Use h5py for local files
         with h5py.File(opera_file) as hf:
@@ -592,28 +573,26 @@ def get_union_polygon(
         Buffer the polygons by this many degrees, by default 0.0
 
     """
-    # Filter out VSI paths (h5py cannot open them)
-    # For GDAL VSI paths like /vsis3/, /vsicurl/, etc., skip them
-    # When streaming from S3, first file is downloaded locally for metadata
+    # Prefer local files (faster), but VSI paths work too via GDAL's multidim API.
     local_files = [f for f in opera_file_list if not str(f).startswith("/vsi")]
 
     if local_files:
-        # Use ALL local files for better polygon union
-        # If only streaming with 1 local file, we get 1 polygon
-        # If all files downloaded, we get union of all polygons (better)
         files_to_use = local_files
         logger.info(
             f"Using {len(local_files)} local file(s) for nodata mask polygon extraction"
         )
     else:
-        # Fallback: use first file (may fail if VSI, caught by try-except)
-        files_to_use = list(opera_file_list[:1])
-        logger.warning(
-            "No local files found; attempting to use first file for polygon"
-            " extraction. This may fail if using VSI paths."
+        files_to_use = list(opera_file_list)
+        logger.info(
+            f"Using {len(files_to_use)} VSI file(s) for nodata mask polygon extraction"
         )
 
-    polygons = [get_cslc_polygon(f, buffer_degrees) for f in files_to_use]
+    # I/O-bound: parallelize across files (each is one /vsis3 ranged GET).
+    max_workers = min(16, len(files_to_use)) or 1
+    with ThreadPoolExecutor(max_workers=max_workers) as exc:
+        polygons = list(
+            exc.map(lambda f: get_cslc_polygon(f, buffer_degrees), files_to_use)
+        )
     polygons = [p for p in polygons if p is not None]
 
     if len(polygons) == 0:
@@ -709,7 +688,7 @@ def create_nodata_mask(
     try:
         test_f = format_nc_filename(opera_file_list[-1], dataset_name)
         # convert pixels to degrees lat/lon
-        gt = _get_raster_gt(test_f)
+        gt = _get_raster_gt(test_f, raw_file=opera_file_list[-1])
     except RuntimeError as e:
         msg = f"Unable to get geotransform from {test_f}"
         raise ValueError(msg) from e
@@ -735,9 +714,30 @@ def create_nodata_mask(
     # Get dimensions and georeferencing
     xsize = src_ds.RasterXSize
     ysize = src_ds.RasterYSize
-    projection = src_ds.GetProjection()
-    geotransform = src_ds.GetGeoTransform()
+    try:
+        projection = src_ds.GetProjection()
+    except RuntimeError:
+        projection = ""
+    try:
+        geotransform = src_ds.GetGeoTransform()
+    except RuntimeError:
+        geotransform = None
     src_ds = None
+
+    # NISAR GSLCs opened via the HDF5 driver don't expose geotransform/projection;
+    # fall back to the multidim API to read xCoordinates/yCoordinates/projection.
+    if (
+        not projection
+        or geotransform is None
+        or tuple(geotransform) == (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    ):
+        info = _read_nisar_geoinfo_multidim(opera_file_list[-1], dataset_name)
+        if info is not None:
+            geotransform, projection = info
+
+    if geotransform is None or not projection:
+        msg = f"Could not resolve geotransform/projection for {test_f_str}"
+        raise ValueError(msg)
 
     # Create output raster directly with GDAL
     driver = gdal.GetDriverByName("GTiff")
@@ -787,13 +787,16 @@ def create_nodata_mask(
 make_nodata_mask = create_nodata_mask
 
 
-def _get_raster_gt(filename: Filename) -> list[float]:
+def _get_raster_gt(filename: Filename, raw_file: Filename | None = None) -> list[float]:
     """Get the geotransform from a file.
 
     Parameters
     ----------
     filename : Filename
-        Path to the file to load.
+        Path to the file to load (already formatted for GDAL, e.g. HDF5:"...":...).
+    raw_file : Filename, optional
+        Unformatted path to the underlying HDF5. Used as a multidim-API fallback
+        when the HDF5 driver doesn't synthesize a geotransform (e.g. NISAR GSLCs).
 
     Returns
     -------
@@ -805,6 +808,248 @@ def _get_raster_gt(filename: Filename) -> list[float]:
         msg = "osgeo (GDAL) must be installed to use this function"
         raise ImportError(msg)
 
-    ds = gdal.Open(fspath(filename))
-    gt = ds.GetGeoTransform()
+    try:
+        ds = gdal.Open(fspath(filename))
+        gt = ds.GetGeoTransform()
+        needs_fallback = tuple(gt) == (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    except RuntimeError:
+        gt = None
+        needs_fallback = True
+
+    if needs_fallback and raw_file is not None:
+        info = _read_nisar_geoinfo_multidim(raw_file)
+        if info is not None:
+            return list(info[0])
+    if gt is None:
+        msg = f"Could not read geotransform from {filename}"
+        raise RuntimeError(msg)
     return gt
+
+
+def _read_mdarray_value(ar):
+    """Read an MDArray or Attribute; return a typed Python scalar / numpy array.
+
+    `MDArray.Read()` returns a raw bytearray for numeric types, so prefer
+    `ReadAsArray()` (which yields a typed numpy array) and fall back to
+    `Read()` only for string/variable-length classes it can't expose.
+    """
+    try:
+        arr = ar.ReadAsArray()
+    except Exception:
+        arr = None
+    if arr is not None:
+        if isinstance(arr, np.ndarray) and arr.size == 1:
+            return arr.item()
+        return arr
+    val = ar.Read()
+    if isinstance(val, (list, tuple)) and len(val) == 1:
+        val = val[0]
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            return bytes(val).decode("utf-8")
+        except UnicodeDecodeError:
+            return bytes(val)
+    return val
+
+
+def _read_scalar_mdarray(
+    filename: Filename, dset_path: str
+) -> tuple[Any, dict[str, Any]]:
+    """Read a scalar MDArray and its attributes via GDAL's multidim API.
+
+    Returns (value, attrs). `value` is a Python scalar (int/float/str/bytes)
+    when possible, the raw numpy array otherwise, or None on failure.
+    """
+    if not HAS_GDAL:
+        return None, {}
+    parts = [p for p in dset_path.split("/") if p]
+    if not parts:
+        return None, {}
+    ds = grp = ar = None
+    try:
+        ds = gdal.OpenEx(fspath(filename), gdal.OF_MULTIDIM_RASTER)
+        if ds is None:
+            return None, {}
+        grp = ds.GetRootGroup()
+        for name in parts[:-1]:
+            grp = grp.OpenGroup(name)
+            if grp is None:
+                return None, {}
+        ar = grp.OpenMDArray(parts[-1])
+        if ar is None:
+            return None, {}
+        val = _read_mdarray_value(ar)
+        attrs: dict[str, Any] = {}
+        try:
+            for a in ar.GetAttributes() or []:
+                attrs[a.GetName()] = _read_mdarray_value(a)
+        except Exception:
+            attrs = {}
+    except Exception as e:
+        logger.debug(f"_read_scalar_mdarray({filename}, {dset_path}) failed: {e}")
+        return None, {}
+    finally:
+        ar = grp = ds = None
+
+    return val, attrs
+
+
+def _read_string_mdarray(filename: Filename, dset_path: str) -> str | None:
+    """Read a scalar string MDArray from an HDF5 via the multidim API.
+
+    Walks the group hierarchy given by `dset_path` (absolute, e.g.
+    `/science/LSAR/identification/boundingPolygon`) and returns the string
+    value. Works for /vsis3 paths with ranged reads.
+    """
+    if not HAS_GDAL:
+        return None
+    parts = [p for p in dset_path.split("/") if p]
+    if len(parts) < 1:
+        return None
+    ds = grp = ar = None
+    try:
+        ds = gdal.OpenEx(fspath(filename), gdal.OF_MULTIDIM_RASTER)
+        if ds is None:
+            return None
+        grp = ds.GetRootGroup()
+        for name in parts[:-1]:
+            grp = grp.OpenGroup(name)
+            if grp is None:
+                return None
+        ar = grp.OpenMDArray(parts[-1])
+        if ar is None:
+            return None
+        val = _read_mdarray_value(ar)
+    except Exception as e:
+        logger.debug(f"_read_string_mdarray({filename}, {dset_path}) failed: {e}")
+        return None
+    finally:
+        ar = grp = ds = None
+
+    if isinstance(val, bytes):
+        return val.decode("utf-8")
+    if isinstance(val, str):
+        return val
+    return None
+
+
+def _read_nisar_geoinfo_multidim(
+    filename: Filename, dataset_name: str | None = None
+) -> tuple[tuple[float, ...], str] | None:
+    """Read (geotransform, projection_wkt) from a NISAR GSLC via multidim API.
+
+    Uses GDAL's multidimensional raster API to read xCoordinates/yCoordinates
+    and the projection's epsg_code attribute. Works over /vsis3 (range reads).
+    Cached so repeated callers for the same file pay only one round trip.
+    """
+    if not HAS_GDAL:
+        return None
+    path = fspath(filename)
+    freq = "A"
+    if dataset_name and "/frequency" in dataset_name:
+        after = dataset_name.split("/frequency", 1)[1]
+        if after and after[0] in ("A", "B"):
+            freq = after[0]
+    return _read_nisar_geoinfo_multidim_cached(path, freq)
+
+
+@functools.lru_cache(maxsize=256)
+def _read_nisar_geoinfo_multidim_cached(
+    path: str, freq: str
+) -> tuple[tuple[float, ...], str] | None:
+
+    ds = rg = grp = None
+    try:
+        ds = gdal.OpenEx(path, gdal.OF_MULTIDIM_RASTER)
+        if ds is None:
+            return None
+        rg = ds.GetRootGroup()
+        grp = rg
+        for name in ("science", "LSAR", "GSLC", "grids"):
+            grp = grp.OpenGroup(name)
+            if grp is None:
+                return None
+        grp = grp.OpenGroup(f"frequency{freq}")
+        if grp is None:
+            return None
+        f64 = gdal.ExtendedDataType.Create(gdal.GDT_Float64)
+        x = grp.OpenMDArray("xCoordinates").ReadAsArray(buffer_datatype=f64)
+        y = grp.OpenMDArray("yCoordinates").ReadAsArray(buffer_datatype=f64)
+        wkt = _read_nisar_projection_wkt(grp.OpenMDArray("projection"))
+    except Exception as e:
+        logger.debug(f"_read_nisar_geoinfo_multidim failed for {path}: {e}")
+        return None
+    finally:
+        grp = rg = ds = None
+
+    if x is None or y is None or x.size < 2 or y.size < 2:
+        return None
+    if not wkt:
+        return None
+    dx = float(x[1] - x[0])
+    dy = float(y[1] - y[0])
+    gt = (float(x[0]), dx, 0.0, float(y[0]), 0.0, dy)
+    return gt, wkt
+
+
+def _read_nisar_projection_wkt(proj_ar) -> str:
+    """Get WKT for a NISAR `projection` MDArray (via `spatial_ref` attribute)."""
+    try:
+        sr = proj_ar.GetAttribute("spatial_ref")
+        if sr is not None:
+            wkt = _coerce_wkt(sr.Read())
+            if wkt:
+                return wkt
+    except Exception:
+        pass
+    # Fallback: build WKT from the integer EPSG code
+    for getter in (
+        lambda: proj_ar.GetAttribute("epsg_code").Read(),
+        lambda: proj_ar.ReadAsArray().item(),
+    ):
+        try:
+            val = getter()
+        except Exception:
+            continue
+        try:
+            epsg = int(val if not isinstance(val, (list, tuple)) else val[0])
+        except (TypeError, ValueError):
+            continue
+        srs = osr.SpatialReference()
+        if srs.ImportFromEPSG(epsg) == 0:
+            return srs.ExportToWkt()
+    return ""
+
+
+_WKT_PREFIXES = ("PROJCS", "GEOGCS", "PROJCRS", "GEOGCRS", "COMPD_CS", "LOCAL_CS")
+
+
+def _coerce_wkt(raw) -> str:
+    """Coerce whatever GDAL's multidim Read() returns into a WKT string.
+
+    Accepts str / bytes / bytearray / nested lists / tuples / numpy object
+    arrays; returns "" if no WKT-looking value is found.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        s = raw.strip().strip("\x00").strip()
+        return s if s.upper().startswith(_WKT_PREFIXES) else ""
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return _coerce_wkt(bytes(raw).decode("utf-8", errors="replace"))
+        except Exception:
+            return ""
+    if isinstance(raw, np.ndarray):
+        for item in raw.ravel():
+            got = _coerce_wkt(item)
+            if got:
+                return got
+        return ""
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            got = _coerce_wkt(item)
+            if got:
+                return got
+        return ""
+    return ""
