@@ -233,8 +233,11 @@ def get_zero_doppler_time(
     def get_dt(in_str):
         # Sentinel-1: datetime_format = "%Y-%m-%d %H:%M:%S.%f"
         # NISAR: datetime_format = "%Y-%m-%dT%H:%M:%S.%f" + some extra digits
+        # h5py returns bytes; the multidim-API VSI path returns str.
+        if isinstance(in_str, (bytes, bytearray)):
+            in_str = bytes(in_str).decode("utf-8")
         # The index 0:26 gets rid of those extra digits
-        return datetime.strptime(in_str.decode("utf-8")[:26], datetime_format)
+        return datetime.strptime(in_str[:26], datetime_format)
 
     # This has to be the default but since we have to change in disp-s1
     # product.py and maybe other use cases, I am leaving it as is
