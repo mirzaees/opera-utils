@@ -384,34 +384,83 @@ def get_s1_orbit(
 def get_nisar_orbit(
     h5file: Filename,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, datetime]:
-    """Parse orbit info from NISAR HDF5 file into python types.
+    """Parse orbit info from a NISAR GSLC HDF5 via GDAL's multidim API.
 
-    Parameters
-    ----------
-    h5file : Filename
-        Path to NISAR GSLC HDF5 file.
+    Works for local paths and ``/vsis3/...`` URLs (the h5py-based version
+    only worked for local files).
 
     Returns
     -------
     times : np.ndarray
-        Array of times in seconds since reference epoch.
+        Times in seconds since ``reference_epoch``.
     positions : np.ndarray
-        Array of positions in meters.
+        Positions in meters, shape ``(N, 3)``.
     velocities : np.ndarray
-        Array of velocities in meters per second.
+        Velocities in m/s, shape ``(N, 3)``.
     reference_epoch : datetime
-        Reference epoch of orbit.
+        Reference epoch parsed from the ``units`` attribute of ``time``.
 
     """
-    with h5py.File(h5file) as hf:
-        orbit_group = hf["/science/LSAR/GSLC//metadata/orbit"]
-        times = orbit_group["time"][:]
-        positions = orbit_group["position"][()]
-        velocities = orbit_group["velocity"][()]
-        units = orbit_group["time"].attrs["units"].decode("utf-8")
-        reference_epoch_str = units.split("since")[-1].strip()
-        reference_epoch = datetime.fromisoformat(reference_epoch_str)
+    if not HAS_GDAL:
+        msg = "osgeo (GDAL) must be installed to use this function"
+        raise ImportError(msg)
+
+    path = fspath(h5file)
+    ds = grp = time_ar = pos_ar = vel_ar = None
+    try:
+        ds = gdal.OpenEx(path, gdal.OF_MULTIDIM_RASTER)
+        if ds is None:
+            msg = f"Could not open {h5file} with GDAL multidim API"
+            raise RuntimeError(msg)
+
+        grp = ds.GetRootGroup()
+        for name in ("science", "LSAR", "GSLC", "metadata", "orbit"):
+            grp = grp.OpenGroup(name)
+            if grp is None:
+                msg = f"Group '{name}' missing under .../metadata/orbit in {h5file}"
+                raise RuntimeError(msg)
+
+        time_ar = grp.OpenMDArray("time")
+        pos_ar = grp.OpenMDArray("position")
+        vel_ar = grp.OpenMDArray("velocity")
+        if time_ar is None or pos_ar is None or vel_ar is None:
+            msg = f"Orbit time/position/velocity missing in {h5file}"
+            raise RuntimeError(msg)
+
+        times = np.ascontiguousarray(time_ar.ReadAsArray())
+        positions = np.ascontiguousarray(pos_ar.ReadAsArray())
+        velocities = np.ascontiguousarray(vel_ar.ReadAsArray())
+
+        units_attr = time_ar.GetAttribute("units")
+        if units_attr is None:
+            msg = f"orbit/time has no 'units' attribute in {h5file}"
+            raise RuntimeError(msg)
+        units = _coerce_attr_str(units_attr.Read())
+    finally:
+        time_ar = pos_ar = vel_ar = grp = ds = None
+
+    if not units or "since" not in units:
+        msg = f"Unexpected orbit/time units string: {units!r}"
+        raise RuntimeError(msg)
+    reference_epoch_str = units.split("since", 1)[-1].strip()
+    reference_epoch = datetime.fromisoformat(reference_epoch_str)
     return times, positions, velocities, reference_epoch
+
+
+def _coerce_attr_str(raw) -> str:
+    """Coerce whatever GDAL's multidim Attribute.Read() returns into a str."""
+    if isinstance(raw, (list, tuple)) and raw:
+        raw = raw[0]
+    if isinstance(raw, np.ndarray) and raw.size >= 1:
+        raw = raw.ravel()[0]
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    if not isinstance(raw, str):
+        raw = str(raw)
+    return raw.strip().rstrip("\x00").strip()
 
 
 def get_cslc_orbit(h5file: Filename):
@@ -960,7 +1009,6 @@ def _read_nisar_geoinfo_multidim(
 def _read_nisar_geoinfo_multidim_cached(
     path: str, freq: str
 ) -> tuple[tuple[float, ...], str] | None:
-
     ds = rg = grp = None
     try:
         ds = gdal.OpenEx(path, gdal.OF_MULTIDIM_RASTER)
@@ -991,7 +1039,7 @@ def _read_nisar_geoinfo_multidim_cached(
         return None
     dx = float(x[1] - x[0])
     dy = float(y[1] - y[0])
-    gt = (float(x[0]), dx, 0.0, float(y[0]), 0.0, dy)
+    gt = (float(x[0]) - dx / 2, dx, 0.0, float(y[0]) - dy / 2, 0.0, dy)
     return gt, wkt
 
 
