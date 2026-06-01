@@ -26,6 +26,10 @@ from ._search import search
 # Metadata groups to copy into subset files (full path from root)
 _IDENTIFICATION_GROUP = NISAR_GSLC_IDENTIFICATION
 _ORBIT_GROUP = f"{NISAR_GSLC_ROOT}/metadata/orbit"
+# sourceData carries small per-frequency parameters (centerFrequency, slantRange,
+# ...) that downstream NISAR product creation reads. It contains no full-res
+# rasters, so copying the whole group keeps subset files self-sufficient cheaply.
+_SOURCE_DATA_GROUP = f"{NISAR_GSLC_ROOT}/metadata/sourceData"
 
 logger = logging.getLogger("opera_utils")
 
@@ -167,8 +171,8 @@ def _extract_subset_from_h5(
     col_slice = cols if cols is not None else slice(None)
 
     with h5py.File(outpath, "w") as dst:
-        # Copy identification and orbit metadata groups
-        for group in [_IDENTIFICATION_GROUP, _ORBIT_GROUP]:
+        # Copy identification, orbit, and sourceData metadata groups
+        for group in [_IDENTIFICATION_GROUP, _ORBIT_GROUP, _SOURCE_DATA_GROUP]:
             if group in src:
                 dst.require_group("/".join(group.split("/")[:-1]))
                 src.copy(group, dst, name=group)
@@ -223,8 +227,10 @@ def _extract_subset_from_h5(
                     # Scalar values, just copy
                     dst_freq_group.create_dataset(coord_name, data=coord_data[()])
 
-        # Copy projection info if present
-        for proj_name in ["projection", "epsg"]:
+        # Copy projection info and centerFrequency if present. centerFrequency is
+        # a scalar read by disp-nisar's wavelength computation (no cache fallback),
+        # so it must survive the subset.
+        for proj_name in ["projection", "epsg", "centerFrequency"]:
             if proj_name in src[freq_path]:
                 proj_data = src[freq_path][proj_name]
                 if isinstance(proj_data, h5py.Dataset):
