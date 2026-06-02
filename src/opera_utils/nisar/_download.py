@@ -43,6 +43,8 @@ def process_file(
     output_dir: Path,
     frequency: str = "A",
     polarizations: list[str] | None = None,
+    compression: str | None = "gzip",
+    compression_opts: int | None = 4,
 ) -> Path:
     """Download and subset a single NISAR GSLC product.
 
@@ -83,6 +85,8 @@ def process_file(
             cols=cols,
             frequency=frequency,
             polarizations=polarizations,
+            compression=compression,
+            compression_opts=compression_opts,
         )
     else:
         # For remote urls (S3 or HTTPS), use open_h5 with cloud-optimized settings
@@ -94,6 +98,8 @@ def process_file(
                 cols=cols,
                 frequency=frequency,
                 polarizations=polarizations,
+                compression=compression,
+                compression_opts=compression_opts,
             )
 
     logger.debug(f"Done: {outname}")
@@ -108,6 +114,8 @@ def _extract_subset(
     frequency: str = "A",
     polarizations: list[str] | None = None,
     chunks: tuple[int, int] = (256, 256),
+    compression: str | None = "gzip",
+    compression_opts: int | None = 4,
 ) -> None:
     """Extract a spatial subset from a local GSLC HDF5 file.
 
@@ -131,7 +139,16 @@ def _extract_subset(
     """
     with h5py.File(input_obj, "r") as src:
         _extract_subset_from_h5(
-            src, outpath, rows, cols, frequency, polarizations, chunks, str(input_obj)
+            src,
+            outpath,
+            rows,
+            cols,
+            frequency,
+            polarizations,
+            chunks,
+            str(input_obj),
+            compression=compression,
+            compression_opts=compression_opts,
         )
 
 
@@ -144,6 +161,9 @@ def _extract_subset_from_h5(
     polarizations: list[str] | None = None,
     chunks: tuple[int, int] = (256, 256),
     source_name: str = "remote",
+    compression: str | None = "gzip",
+    compression_opts: int | None = 4,
+    row_block: int = 1024,
 ) -> None:
     """Extract a spatial subset from an open HDF5 file handle.
 
@@ -236,33 +256,50 @@ def _extract_subset_from_h5(
                 if isinstance(proj_data, h5py.Dataset):
                     dst_freq_group.create_dataset(proj_name, data=proj_data[()])
 
-        # Extract each polarization
+        # Compression kwargs (``compression_opts`` is only valid for gzip).
+        comp_kwargs: dict = {}
+        if compression:
+            comp_kwargs["compression"] = compression
+            if compression == "gzip" and compression_opts is not None:
+                comp_kwargs["compression_opts"] = compression_opts
+
+        # Extract each polarization, streaming in row blocks. Reading the full
+        # multi-GB raster at once is slow and memory-heavy (and unsafe when many
+        # files are staged concurrently); copying ``row_block`` rows at a time
+        # bounds memory and issues large sequential range reads to the source.
         for pol in pols_to_extract:
             pol_path = f"{freq_path}/{pol}"
             src_dset = src[pol_path]
 
-            # Get the subset
-            subset_data = src_dset[row_slice, col_slice]
+            nrows, ncols = src_dset.shape[:2]
+            r0, r1, rstep = row_slice.indices(nrows)
+            c0, c1, cstep = col_slice.indices(ncols)
+            out_rows = max(0, len(range(r0, r1, rstep)))
+            out_cols = max(0, len(range(c0, c1, cstep)))
+            out_shape = (out_rows, out_cols)
 
-            # Determine chunk size (don't exceed data dimensions)
-            out_shape = subset_data.shape
             actual_chunks = (
-                min(chunks[0], out_shape[0]),
-                min(chunks[1], out_shape[1]),
+                min(chunks[0], out_rows) or 1,
+                min(chunks[1], out_cols) or 1,
+            )
+            dst_dset = dst.create_dataset(
+                pol_path,
+                shape=out_shape,
+                dtype=src_dset.dtype,
+                chunks=actual_chunks,
+                **comp_kwargs,
             )
 
-            # Create output dataset with compression
-            dst.create_dataset(
-                pol_path,
-                data=subset_data,
-                chunks=actual_chunks,
-                compression="gzip",
-                compression_opts=4,
-            )
+            step = max(row_block, actual_chunks[0])
+            for i in range(0, out_rows, step):
+                j = min(i + step, out_rows)
+                sr0 = r0 + i * rstep
+                sr1 = r0 + j * rstep
+                dst_dset[i:j, :] = src_dset[sr0:sr1:rstep, c0:c1:cstep]
 
             # Copy attributes
             for attr_name, attr_val in src_dset.attrs.items():
-                dst[pol_path].attrs[attr_name] = attr_val
+                dst_dset.attrs[attr_name] = attr_val
 
             logger.debug(f"Extracted {pol}: {src_dset.shape} -> {out_shape}")
 
